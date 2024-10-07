@@ -6,7 +6,7 @@ import json
 import itertools
 import asyncio
 import aiohttp
-import mutagen
+from bs4 import BeautifulSoup
 
 from . import sync, util
 
@@ -47,24 +47,6 @@ async def get_obj_from(url):
         return False
 
 
-
-
-async def embed_artwork(audio:mutagen.File, artwork_url):
-    """ Embed an artwork image into a mp3 """
-    if artwork_url:
-        audio.tags.add(
-            mutagen.id3.APIC(
-                encoding=3,
-                mime='image/jpeg',
-                type=3,
-                desc='Cover',
-                data=await get_resource(artwork_url)
-            )
-        )
-    return audio
-
-
-
 class SoundcloudAPI(sync.SoundcloudAPI):
     """ Asynchronous Soundcloud API Client """
 
@@ -82,8 +64,11 @@ class SoundcloudAPI(sync.SoundcloudAPI):
         """ Resolve an api url to a soundcloud object """
         if not self.client_id:
             await self.get_credentials()
-        full_url = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={self.client_id}&app_version=1499347238"
+        full_url = f"https://api-v2.soundcloud.com/tracks?ids={await self.get_track_id(url)}&client_id={self.client_id}"
         obj = await get_obj_from(full_url)
+        if not obj:
+            raise ValueError('Could not resolve url')
+        obj = obj[0]
         if obj['kind'] == 'track':
             return Track(obj=obj, client=self)
 
@@ -91,6 +76,15 @@ class SoundcloudAPI(sync.SoundcloudAPI):
             playlist = Playlist(obj=obj, client=self)
             await playlist.clean_attributes()
             return playlist
+
+    # Getting the track ID
+    async def get_track_id(self, url):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                content = await response.text()
+                soup = BeautifulSoup(content, "html.parser")
+                track_id = soup.find("meta", property="twitter:app:url:googleplay")["content"].split(":")[-1]
+                return track_id
 
     async def get_tracks(self, *track_ids):  # pylint: disable=invalid-overridden-method
         """ Get a list of tracks from a list of ids """
@@ -117,8 +111,20 @@ class Track(sync.Track):
         try:
             file.seek(0)
             stream_url = await self.get_stream_url()
-            track_mp3_bytes = await get_resource(stream_url)
-            file.write(track_mp3_bytes)
+            track_bytes = await get_resource(stream_url)
+            track_bytes_split = track_bytes.splitlines()
+            chunks = []
+            for chunk in track_bytes_split:
+                if not chunk.startswith(b'#'):
+                    chunks.append(chunk.decode('utf-8'))
+            for chunk in chunks:
+                bytes = await get_resource(chunk)
+                # # save to another file
+                # with open('temp.txt', 'ab') as temp_file:
+                #     temp_file.write(bytes)
+                # break
+                # print(f"byte: {bytes}")
+                file.write(bytes)
             file.seek(0)
 
             album_artwork = None
@@ -140,6 +146,8 @@ class Track(sync.Track):
         prog_url = self.get_prog_url()
         stream_response = await get_obj_from(prog_url)
         try:
+            if not stream_response:
+                raise ValueError('Stream response is empty')
             return stream_response['url']
         except Exception as exc:  # pylint: disable=broad-except)
             eprint(exc)
@@ -167,7 +175,7 @@ class Playlist(sync.Playlist):
             return
         self.ready = True
 
-        track_objects = []  # type: [Track] # all completed track objects
+        track_objects = []
         incomplete_track_ids = []   # tracks that do not have metadata
 
         while self.tracks and 'title' in self.tracks[0]:       # remove completed track objects
@@ -176,6 +184,8 @@ class Playlist(sync.Playlist):
         while self.tracks:   # while built tracks are less than all tracks
             incomplete_track_ids.append(self.tracks.pop(0)['id'])
             if len(incomplete_track_ids) == self.RESOLVE_THRESHOLD or not self.tracks:
+                if not self.client:
+                    return
                 new_tracks = await self.client.get_tracks(*incomplete_track_ids)
                 track_objects.extend([Track(obj=t, client=self.client) for t in new_tracks])
                 incomplete_track_ids.clear()
@@ -195,6 +205,6 @@ class Playlist(sync.Playlist):
         playlist_dict = {}
         for attr in set(self.__slots__):
             if attr not in ignore_attributes:
-                playlist_dict[attr] = getattr(attr)
+                playlist_dict[attr] = getattr(self, attr)
 
         return playlist_dict

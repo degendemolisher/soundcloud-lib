@@ -2,9 +2,11 @@
 from urllib.request import urlopen
 import json
 import random
+import base64
 from ssl import SSLContext
 from concurrent import futures
 import mutagen
+import mutagen.oggopus
 from . import util
 
 
@@ -227,7 +229,9 @@ class Track:
     def get_prog_url(self):
         """ Get url """
         for transcode in self.media['transcodings']:
-            if transcode['format']['protocol'] == 'progressive':
+            # if transcode['format']['protocol'] == 'progressive':
+            #     return transcode['url'] + "?client_id=" + self.client.client_id
+            if transcode['preset'] == 'opus_0_0':
                 return transcode['url'] + "?client_id=" + self.client.client_id
         raise UnsupportedFormatError("As of soundcloud-lib 0.5.0, tracks that are not marked as 'Downloadable' cannot be downloaded because this library does not yet assemble HLS streams.")
 #
@@ -239,43 +243,31 @@ class Track:
         url_response = get_obj_from(prog_url)
         return url_response['url']
 
-    def write_track_id3(self, track_fp, album_artwork:bytes = None):
+    def write_track_id3(self, track_fp, album_artwork: bytes = None):
         """ Write track meta """
         try:
-            audio = mutagen.File(track_fp, filename="x.mp3")
-            audio.add_tags()
-
-        # SET TITLE
-            frame = mutagen.id3.TIT2(encoding=3)
-            frame.append(self.title)
-            audio.tags.add(frame)
-        # SET ARTIST
-            frame = mutagen.id3.TPE1(encoding=3)
-            frame.append(self.artist)
-            audio.tags.add(frame)
-
-        # SET ALBUM
+            audio = mutagen.oggopus.OggOpus(track_fp, filename='x.opus')
+            
+            # SET TITLE
+            audio['title'] = [self.title]
+            
+            # SET ARTIST
+            audio['artist'] = [self.artist]
+            
+            # SET ALBUM
             if self.album:
-                frame = mutagen.id3.TALB(encoding=3)
-                frame.append(self.album)
-                audio.tags.add(frame)
-        # SET TRACK NO
+                audio['album'] = [self.album]
+            
+            # SET TRACK NO
             if self.track_no:
-                frame = mutagen.id3.TRCK(encoding=3)
-                frame.append(str(self.track_no))
-                audio.tags.add(frame)
-        # SET ARTWORK
+                audio['tracknumber'] = [str(self.track_no)]
+            
+            # SET ARTWORK
             if album_artwork:
-                audio.tags.add(
-                    mutagen.id3.APIC(
-                        encoding=3,
-                        mime='image/jpeg',
-                        type=3,
-                        desc='Cover',
-                        data=album_artwork
-                    )
-                )
-            audio.save(track_fp, v1=2)
+                encoded_artwork = base64.b64encode(album_artwork).decode('utf-8')
+                audio['metadata_block_picture'] = [encoded_artwork]
+            
+            audio.save(track_fp)
             self.ready = True
             track_fp.seek(0)
             return track_fp
